@@ -164,13 +164,13 @@ loss, acc, weight = standard_process(epochs)
 # In[8]:
 
 
-loss_plot(loss)
+# loss_plot(loss)
 
 
 # In[9]:
 
 
-accuracy_plot(acc)
+# accuracy_plot(acc)
 
 
 # In[10]:
@@ -184,18 +184,20 @@ loss_ewc, acc_ewc = ewc_process(epochs, importance=1000,
 # In[11]:
 
 
-loss_plot(loss_ewc)
+# loss_plot(loss_ewc)
 
 
 # In[12]:
 
 
-accuracy_plot(acc_ewc)
+# accuracy_plot(acc_ewc)
 
 
 # In[13]:
 
-
+print('SGD', acc[0])
+print('EWC', acc_ewc[0])
+  
 plt.plot(acc[0], label="sgd")
 plt.plot(acc_ewc[0], label="ewc")
 plt.legend()
