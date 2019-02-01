@@ -13,6 +13,44 @@ def variable(t: torch.Tensor, use_cuda=True, **kwargs):
         t = t.cuda()
     return Variable(t, **kwargs)
 
+def emp_diag_fisher(model:nn.Module, dataloader:
+        list, device: torch.device = 'cuda'):
+    precision_matrices = { 
+            n: torch.zeros_like(p).to(device)
+            for n, p in model.named_parameters() }
+    model.eval()
+    model = model.to(device)
+    for image, label in dataloader:
+        model.zero_grad()
+        image = image.to(device)
+        label = label.to(device)
+        if image.dim() == 3:
+            image.unsqueeze_(0)
+            label.unsqueeze_(0)
+        logits = model(image)
+        loss = F.cross_entropy(logits, label)
+        loss.backward(retain_graph=True)
+
+        for n, p in model.named_parameters():
+            if p.grad is not None:
+                precision_matrices[n] +=\
+                p.grad.detach().pow(2)
+
+        num_samples = len(dataloader)
+        precision_matrices = {n: p/num_samples for
+                n, p in precision_matrices.items() }
+        return precision_matrices
+
+def ewc_penalty(old_params: dict, model: nn.Module,
+        diag_fisher: dict, exclude_layers: list = []):
+    loss = 0
+    for n, p in model.named_parameters():
+        if n not in exclude_layers:
+            _loss = diag_fisher[n] * (p - old_params[n]).pow(2)
+            loss += _loss.sum()
+    return loss
+
+
 
 class EWC(object):
     def __init__(self, model: nn.Module, dataset: list):
@@ -20,40 +58,36 @@ class EWC(object):
         self.model = model
         self.dataset = dataset
 
-        self.params = {n: p for n, p in self.model.named_parameters() if p.requires_grad}
-        self._means = {}
+        self.params = {n: p.detach() for n, p in self.model.named_parameters() if p.requires_grad}
         self._precision_matrices = self._diag_fisher()
-
-        for n, p in deepcopy(self.params).items():
-            self._means[n] = variable(p.data)
 
     def _diag_fisher(self):
         precision_matrices = {}
-        for n, p in deepcopy(self.params).items():
-            p.data.zero_()
-            precision_matrices[n] = variable(p.data)
+        for n, p in self.params.items():
+            precision_matrices[n] = torch.zeros_like(p)
 
         self.model.eval()
-        for input, _ in self.dataset:
+        for input, label in self.dataset:
             self.model.zero_grad()
             input = input.cuda()
+            label = label.cuda()
             if input.dim() == 3:
                 input = input.unsqueeze_(0)
+                label = label.unsqueeze_(0)
             output = self.model(input).view(1, -1)
-            label = output.max(1)[1].view(-1)
             loss = F.nll_loss(F.log_softmax(output, dim=1), label)
             loss.backward()
 
             for n, p in self.model.named_parameters():
-                precision_matrices[n].data += p.grad.data ** 2 / len(self.dataset)
+                precision_matrices[n] += p.grad.detach() ** 2 #/ len(self.dataset)
 
-        precision_matrices = {n: p for n, p in precision_matrices.items()}
+        precision_matrices = {n: p/len(self.dataset) for n, p in precision_matrices.items()}
         return precision_matrices
 
     def penalty(self, model: nn.Module):
         loss = 0
         for n, p in model.named_parameters():
-            _loss = self._precision_matrices[n] * (p - self._means[n]) ** 2
+            _loss = self._precision_matrices[n] * (p - self.params[n]) ** 2
             loss += _loss.sum()
         return loss
 
@@ -73,15 +107,19 @@ def normal_train(model: nn.Module, optimizer: torch.optim, data_loader: torch.ut
 
 
 def ewc_train(model: nn.Module, optimizer: torch.optim, data_loader: torch.utils.data.DataLoader,
-              ewc: EWC, importance: float):
+              fisher_info: dict, importance: float):
     model.train()
     epoch_loss = 0
+    params = { n: p.detach() for n, p in model.named_parameters() }
     for input, target in data_loader:
         input, target = variable(input), variable(target)
         optimizer.zero_grad()
         output = model(input)
-        loss = F.cross_entropy(output, target) + importance * ewc.penalty(model)
-        epoch_loss += loss.data[0]
+        xent_loss = F.cross_entropy(output, target)
+        ewc_loss = importance * ewc_penalty(params, model, fisher_info)
+        loss = xent_loss + ewc_loss
+        print('cls loss {}, ewc loss {}'.format(xent_loss, ewc_loss))
+        epoch_loss += loss.item()
         loss.backward()
         optimizer.step()
     return epoch_loss / len(data_loader)
